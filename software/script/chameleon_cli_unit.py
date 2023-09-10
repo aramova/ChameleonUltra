@@ -23,6 +23,7 @@ class BaseCLIUnit:
     def __init__(self):
         # new a device command transfer and receiver instance(Send cmd and receive response)
         self._device_com: chameleon_com.ChameleonCom | None = None
+        self._device_cmd: chameleon_cmd.ChameleonCMD = chameleon_cmd.ChameleonCMD(self._device_com)
 
     @property
     def device_com(self) -> chameleon_com.ChameleonCom:
@@ -31,10 +32,11 @@ class BaseCLIUnit:
     @device_com.setter
     def device_com(self, com):
         self._device_com = com
+        self._device_cmd = chameleon_cmd.ChameleonCMD(self._device_com)
 
     @property
     def cmd(self) -> chameleon_cmd.ChameleonCMD:
-        return chameleon_cmd.ChameleonCMD(self.device_com)
+        return self._device_cmd
 
     def args_parser(self) -> ArgumentParserNoExit or None:
         """
@@ -139,7 +141,7 @@ class ReaderRequiredUnit(DeviceRequiredUnit):
 
     def before_exec(self, args: argparse.Namespace):
         if super(ReaderRequiredUnit, self).before_exec(args):
-            ret = self.cmd.is_reader_device_mode()
+            ret = self.cmd.is_device_reader_mode()
             if ret:
                 return True
             else:
@@ -220,6 +222,8 @@ class HWConnect(BaseCLIUnit):
                     return
             self.device_com.open(args.port)
             print(" { Chameleon connected } ")
+            self.device_com.commands = self.cmd.get_device_capabilities()
+
         except Exception as e:
             print(f"Chameleon Connect fail: {str(e)}")
 
@@ -235,10 +239,10 @@ class HWModeSet(DeviceRequiredUnit):
 
     def on_exec(self, args: argparse.Namespace):
         if args.mode == 'reader' or args.mode == 'r':
-            self.cmd.set_reader_device_mode(True)
+            self.cmd.set_device_reader_mode(True)
             print("Switch to {  Tag Reader  } mode successfully.")
         else:
-            self.cmd.set_reader_device_mode(False)
+            self.cmd.set_device_reader_mode(False)
             print("Switch to { Tag Emulator } mode successfully.")
 
 
@@ -248,7 +252,7 @@ class HWModeGet(DeviceRequiredUnit):
         pass
 
     def on_exec(self, args: argparse.Namespace):
-        print(f"- Device Mode ( Tag {'Reader' if self.cmd.is_reader_device_mode() else 'Emulator'} )")
+        print(f"- Device Mode ( Tag {'Reader' if self.cmd.is_device_reader_mode() else 'Emulator'} )")
 
 
 @hw_chipid.command('get', 'Get device chipset ID')
@@ -275,8 +279,8 @@ class HWVersion(DeviceRequiredUnit):
         return None
 
     def on_exec(self, args: argparse.Namespace):
-        fw_version_int = self.cmd.get_firmware_version()
-        fw_version = f'v{fw_version_int // 256}.{fw_version_int % 256}'
+        fw_version_tuple = self.cmd.get_app_version()
+        fw_version = f'v{fw_version_tuple[0]}.{fw_version_tuple[1]}'
         git_version = self.cmd.get_git_version()
         print(f' - Version: {fw_version} ({git_version})')
 
@@ -287,7 +291,8 @@ class HF14AScan(ReaderRequiredUnit):
         pass
 
     def scan(self):
-        resp: chameleon_com.Response = self.cmd.scan_tag_14a()
+        # FIXME:
+        resp: chameleon_com.Response = self.cmd.hf14a_scan()
         if resp.status == chameleon_status.Device.HF_TAG_OK:
             info = chameleon_cstruct.parse_14a_scan_tag_result(resp.data)
             print(f"- UID  Size: {info['uid_size']}")
@@ -310,11 +315,11 @@ class HF14AInfo(ReaderRequiredUnit):
 
     def info(self):
         # detect mf1 support
-        resp = self.cmd.detect_mf1_support()
+        resp = self.cmd.mf1_detect_support()
         if resp.status == chameleon_status.Device.HF_TAG_OK:
             # detect prng
             print("- Mifare Classic technology")
-            resp = self.cmd.detect_mf1_nt_level()
+            resp = self.cmd.mf1_detect_nt_level()
             if resp.status == 0x00:
                 prng_level = "Weak"
             elif resp.status == 0x24:
@@ -363,8 +368,8 @@ class HFMFNested(ReaderRequiredUnit):
         :return:
         """
         # acquire
-        dist_resp = self.cmd.detect_nt_distance(block_known, type_known, key_known)
-        nt_resp = self.cmd.acquire_nested(block_known, type_known, key_known, block_target, type_target)
+        dist_resp = self.cmd.mf1_detect_nt_dist(block_known, type_known, key_known)
+        nt_resp = self.cmd.mf1_nested_acquire(block_known, type_known, key_known, block_target, type_target)
         # parse
         dist_obj = chameleon_cstruct.parse_nt_distance_detect_result(dist_resp.data)
         nt_obj = chameleon_cstruct.parse_nested_nt_acquire_group(nt_resp.data)
@@ -398,7 +403,7 @@ class HFMFNested(ReaderRequiredUnit):
             print(f" - [{len(key_list)} candidate keys found ]")
             for key in key_list:
                 key_bytes = bytearray.fromhex(key)
-                ret = self.cmd.auth_mf1_key(block_target, type_target, key_bytes)
+                ret = self.cmd.mf1_auth_one_key_block(block_target, type_target, key_bytes)
                 if ret.status == chameleon_status.Device.HF_TAG_OK:
                     return key
         else:
@@ -456,7 +461,7 @@ class HFMFDarkside(ReaderRequiredUnit):
         first_recover = True
         retry_count = 0
         while retry_count < 0xFF:
-            darkside_resp = self.cmd.acquire_darkside(block_target, type_target, first_recover, 15)
+            darkside_resp = self.cmd.mf1_darkside_acquire(block_target, type_target, first_recover, 15)
             first_recover = False  # not first run.
             darkside_obj = chameleon_cstruct.parse_darkside_acquire_result(darkside_resp.data)
             self.darkside_list.append(darkside_obj)
@@ -489,7 +494,7 @@ class HFMFDarkside(ReaderRequiredUnit):
                 # auth key
                 for key in key_list:
                     key_bytes = bytearray.fromhex(key)
-                    auth_ret = self.cmd.auth_mf1_key(block_target, type_target, key_bytes)
+                    auth_ret = self.cmd.mf1_auth_one_key_block(block_target, type_target, key_bytes)
                     if auth_ret.status == chameleon_status.Device.HF_TAG_OK:
                         return key
         return None
@@ -535,7 +540,7 @@ class HFMFRDBL(BaseMF1AuthOpera):
     # hf mf rdbl -b 2 -t A -k FFFFFFFFFFFF
     def on_exec(self, args: argparse.Namespace):
         param = self.get_param(args)
-        resp = self.cmd.read_mf1_block(param.block, param.type, param.key)
+        resp = self.cmd.mf1_read_one_block(param.block, param.type, param.key)
         print(f" - Data: {resp.data.hex()}")
 
 
@@ -553,7 +558,7 @@ class HFMFWRBL(BaseMF1AuthOpera):
         if not re.match(r"^[a-fA-F0-9]{32}$", args.data):
             raise ArgsParserError("Data must include 32 HEX symbols")
         param.data = bytearray.fromhex(args.data)
-        resp = self.cmd.write_mf1_block(param.block, param.type, param.key, param.data)
+        resp = self.cmd.mf1_write_one_block(param.block, param.type, param.key, param.data)
         if resp.status == chameleon_status.Device.HF_TAG_OK:
             print(f" - {colorama.Fore.GREEN}Write done.{colorama.Style.RESET_ALL}")
         else:
@@ -570,7 +575,7 @@ class HFMFDetectionEnable(DeviceRequiredUnit):
     # hf mf detection enable -e 1
     def on_exec(self, args: argparse.Namespace):
         enable = True if args.enable == 1 else False
-        self.cmd.set_mf1_detection_enable(enable)
+        self.cmd.mf1_set_detection_enable(enable)
         print(f" - Set mf1 detection {'enable' if enable else 'disable'}.")
 
 
@@ -581,7 +586,7 @@ class HFMFDetectionLogCount(DeviceRequiredUnit):
 
     # hf mf detection count
     def on_exec(self, args: argparse.Namespace):
-        data_bytes = self.cmd.get_mf1_detection_count().data
+        data_bytes = self.cmd.mf1_get_detection_count().data
         count = int.from_bytes(data_bytes, "little", signed=False)
         print(f" - MF1 detection log count = {count}")
 
@@ -629,13 +634,13 @@ class HFMFDetectionDecrypt(DeviceRequiredUnit):
     def on_exec(self, args: argparse.Namespace):
         buffer = bytearray()
         index = 0
-        count = int.from_bytes(self.cmd.get_mf1_detection_count().data, "little", signed=False)
+        count = int.from_bytes(self.cmd.mf1_get_detection_count().data, "little", signed=False)
         if count == 0:
             print(" - No detection log to download")
             return
         print(f" - MF1 detection log count = {count}, start download", end="")
         while index < count:
-            tmp = self.cmd.get_mf1_detection_log(index).data
+            tmp = self.cmd.mf1_get_detection_log(index).data
             recv_count = int(len(tmp) / HFMFDetectionDecrypt.detection_log_size)
             index += recv_count
             buffer.extend(tmp)
@@ -709,7 +714,7 @@ class HFMFELoad(DeviceRequiredUnit):
             block_data = buffer[index: index + 16]
             index += 16
             # load to device
-            self.cmd.set_mf1_block_data(block, block_data)
+            self.cmd.mf1_write_emu_block_data(block, block_data)
             print('.', end='')
             block += 1
         print("\n - Load success")
@@ -735,9 +740,9 @@ class HFMFERead(DeviceRequiredUnit):
         else:
             content_type = args.type
 
-        selected_slot = self.cmd.get_active_slot().data[0]
-        slot_info = self.cmd.get_slot_info().data
-        tag_type = chameleon_cmd.TagSpecificType(slot_info[selected_slot * 2])
+        selected_slot = self.cmd.get_active_slot()
+        slot_info = self.cmd.get_slot_info()
+        tag_type = chameleon_cmd.TagSpecificType(slot_info[selected_slot][0])
         if tag_type == chameleon_cmd.TagSpecificType.TAG_TYPE_MIFARE_Mini:
             block_count = 20
         elif tag_type == chameleon_cmd.TagSpecificType.TAG_TYPE_MIFARE_1024:
@@ -752,7 +757,7 @@ class HFMFERead(DeviceRequiredUnit):
         with open(file, 'wb') as fd:
             block = 0
             while block < block_count:
-                response = self.cmd.get_mf1_block_data(block, 1)
+                response = self.cmd.mf1_read_emu_block_data(block, 1)
                 print('.', end='')
                 block += 1
                 if content_type == 'hex':
@@ -789,16 +794,16 @@ class HFMFSettings(DeviceRequiredUnit):
     # hf mf settings
     def on_exec(self, args: argparse.Namespace):
         if args.gen1a != -1:
-            self.cmd.set_mf1_gen1a_mode(args.gen1a)
+            self.cmd.mf1_set_gen1a_mode(args.gen1a)
             print(f' - Set gen1a mode to {"enabled" if args.gen1a else "disabled"} success')
         if args.gen2 != -1:
-            self.cmd.set_mf1_gen2_mode(args.gen2)
+            self.cmd.mf1_set_gen2_mode(args.gen2)
             print(f' - Set gen2 mode to {"enabled" if args.gen2 else "disabled"} success')
         if args.coll != -1:
-            self.cmd.set_mf1_block_anti_coll_mode(args.coll)
+            self.cmd.mf1_set_block_anti_coll_mode(args.coll)
             print(f' - Set anti-collision mode to {"enabled" if args.coll else "disabled"} success')
         if args.write != -1:
-            self.cmd.set_mf1_write_mode(args.write)
+            self.cmd.mf1_set_write_mode(args.write)
             print(f' - Set write mode to {chameleon_cmd.MifareClassicWriteMode(args.write)} success')
         print(' - Emulator settings updated')
 
@@ -836,7 +841,7 @@ class HFMFSim(DeviceRequiredUnit):
         else:
             raise Exception("UID must be hex")
 
-        self.cmd.set_mf1_anti_collision_res(sak, atqa, uid)
+        self.cmd.mf1_set_anti_collision_res(sak, atqa, uid)
         print(" - Set anti-collision resources success")
 
 
@@ -846,7 +851,8 @@ class HFMFInfo(DeviceRequiredUnit):
         pass
 
     def scan(self):
-        resp: chameleon_com.Response = self.cmd.get_mf1_anti_coll_data()
+        # FIXME:
+        resp: chameleon_com.Response = self.cmd.mf1_get_anti_coll_data()
         if resp.status == chameleon_status.Device.STATUS_DEVICE_SUCCESS:
             info = chameleon_cstruct.parse_14a_scan_tag_result(resp.data)
             print(f"- UID  Size: {info['uid_size']}")
@@ -868,7 +874,7 @@ class LFEMRead(ReaderRequiredUnit):
         return None
 
     def on_exec(self, args: argparse.Namespace):
-        resp = self.cmd.read_em_410x()
+        resp = self.cmd.em410x_scan()
         id_hex = resp.data.hex()
         print(f" - EM410x ID(10H): {colorama.Fore.GREEN}{id_hex}{colorama.Style.RESET_ALL}")
 
@@ -908,7 +914,7 @@ class LFEMWriteT55xx(LFEMCardRequiredUnit, ReaderRequiredUnit):
     def on_exec(self, args: argparse.Namespace):
         id_hex = args.id
         id_bytes = bytearray.fromhex(id_hex)
-        self.cmd.write_em_410x_to_t55xx(id_bytes)
+        self.cmd.em410x_write_to_t55xx(id_bytes)
         print(f" - EM410x ID(10H): {id_hex} write done.")
 
 
@@ -962,7 +968,7 @@ class HWSlotList(DeviceRequiredUnit):
 
     def get_slot_name(self, slot, sense):
         try:
-            return self.cmd.get_slot_tag_nick_name(slot, sense).data.decode()
+            return self.cmd.get_slot_tag_nick(slot, sense).decode(encoding="utf8")
         except UnexpectedResponseError:
             return "Empty"
         except UnicodeDecodeError:
@@ -970,20 +976,20 @@ class HWSlotList(DeviceRequiredUnit):
 
     # hw slot list
     def on_exec(self, args: argparse.Namespace):
-        data = self.cmd.get_slot_info().data
-        selected = chameleon_cmd.SlotNumber.from_fw(self.cmd.get_active_slot().data[0])
-        enabled = self.cmd.get_enabled_slots().data
+        slotinfo = self.cmd.get_slot_info()
+        selected = chameleon_cmd.SlotNumber.from_fw(self.cmd.get_active_slot())
+        enabled = self.cmd.get_enabled_slots()
         for slot in chameleon_cmd.SlotNumber:
             print(f' - Slot {slot} data{" (active)" if slot == selected else ""}'
                   f'{" (disabled)" if not enabled[chameleon_cmd.SlotNumber.to_fw(slot)] else ""}:')
             print(f'   HF: '
                   f'{(self.get_slot_name(slot, chameleon_cmd.TagSenseType.TAG_SENSE_HF) + " - ") if args.extend else ""}'
-                  f'{chameleon_cmd.TagSpecificType(data[chameleon_cmd.SlotNumber.to_fw(slot) * 2])}')
+                  f'{chameleon_cmd.TagSpecificType(slotinfo[chameleon_cmd.SlotNumber.to_fw(slot)][0])}')
             print(f'   LF: '
                   f'{(self.get_slot_name(slot, chameleon_cmd.TagSenseType.TAG_SENSE_LF) + " - ") if args.extend else ""}'
-                  f'{chameleon_cmd.TagSpecificType(data[chameleon_cmd.SlotNumber.to_fw(slot) * 2 + 1])}')
+                  f'{chameleon_cmd.TagSpecificType(slotinfo[chameleon_cmd.SlotNumber.to_fw(slot)][1])}')
             if args.extend == 2 or args.extend == 1 and enabled[chameleon_cmd.SlotNumber.to_fw(slot)]:
-                config = self.cmd.get_mf1_emulator_settings().data
+                config = self.cmd.mf1_get_emulator_config().data
                 print(' - Mifare Classic emulator settings:')
                 print(f'   Detection (mfkey32) mode: {"enabled" if config[0] else "disabled"}')
                 print(f'   Gen1A magic mode: {"enabled" if config[1] else "disabled"}')
@@ -1001,7 +1007,7 @@ class HWSlotSet(SlotIndexRequireUnit):
     # hw slot change -s 1
     def on_exec(self, args: argparse.Namespace):
         slot_index = args.slot
-        self.cmd.set_slot_activated(slot_index)
+        self.cmd.set_active_slot(slot_index)
         print(f" - Set slot {slot_index} activated success.")
 
 
@@ -1100,7 +1106,7 @@ class LFEMSimSet(LFEMCardRequiredUnit):
     def on_exec(self, args: argparse.Namespace):
         id_hex = args.id
         id_bytes = bytearray.fromhex(id_hex)
-        self.cmd.set_em410x_sim_id(id_bytes)
+        self.cmd.em410x_set_emu_id(id_bytes)
         print(' - Set em410x tag id success.')
 
 
@@ -1111,7 +1117,7 @@ class LFEMSimGet(DeviceRequiredUnit):
 
     # lf em sim get
     def on_exec(self, args: argparse.Namespace):
-        response = self.cmd.get_em410x_sim_id()
+        response = self.cmd.em410x_get_emu_id()
         print(' - Get em410x tag id success.')
         print(f'ID: {response.data.hex()}')
 
@@ -1133,7 +1139,7 @@ class HWSlotNickSet(SlotIndexRequireUnit, SenseTypeRequireUnit):
         encoded_name = name.encode(encoding="utf8")
         if len(encoded_name) > 32:
             raise ValueError("Your tag nick name too long.")
-        self.cmd.set_slot_tag_nick_name(slot_num, sense_type, encoded_name)
+        self.cmd.set_slot_tag_nick(slot_num, sense_type, encoded_name)
         print(f' - Set tag nick name for slot {slot_num} success.')
 
 
@@ -1149,8 +1155,8 @@ class HWSlotNickGet(SlotIndexRequireUnit, SenseTypeRequireUnit):
     def on_exec(self, args: argparse.Namespace):
         slot_num = args.slot
         sense_type = args.sense_type
-        res = self.cmd.get_slot_tag_nick_name(slot_num, sense_type)
-        print(f' - Get tag nick name for slot {slot_num}: {res.data.decode()}')
+        res = self.cmd.get_slot_tag_nick(slot_num, sense_type)
+        print(f' - Get tag nick name for slot {slot_num}: {res.decode(encoding="utf8")}')
 
 
 @hw_slot.command('update', 'Update config & data to device flash')
@@ -1160,7 +1166,7 @@ class HWSlotUpdate(DeviceRequiredUnit):
 
     # hw slot update
     def on_exec(self, args: argparse.Namespace):
-        self.cmd.update_slot_data_config()
+        self.cmd.slot_data_config_save()
         print(' - Update config and data from device memory to flash success.')
 
 
@@ -1189,7 +1195,7 @@ class HWSlotOpenAll(DeviceRequiredUnit):
             print(f' Slot {slot} setting done.')
 
         # update config and save to flash
-        self.cmd.update_slot_data_config()
+        self.cmd.slot_data_config_save()
         print(' - Succeeded opening all slots and setting data to default.')
 
 
@@ -1201,7 +1207,7 @@ class HWDFU(DeviceRequiredUnit):
     # hw dfu
     def on_exec(self, args: argparse.Namespace):
         print("Application restarting...")
-        self.cmd.enter_dfu_mode()
+        self.cmd.enter_bootloader()
         # In theory, after the above command is executed, the dfu mode will enter, and then the USB will restart,
         # To judge whether to enter the USB successfully, we only need to judge whether the USB becomes the VID and PID
         # of the DFU device.
@@ -1218,12 +1224,12 @@ class HWSettingsAnimationGet(DeviceRequiredUnit):
         return None
 
     def on_exec(self, args: argparse.Namespace):
-        resp: chameleon_com.Response = self.cmd.get_settings_animation()
-        if resp.data[0] == 0:
+        resp = self.cmd.get_animation_mode()
+        if resp == 0:
             print("Full animation")
-        elif resp.data[0] == 1:
+        elif resp == 1:
             print("Minimal animation")
-        elif resp.data[0] == 2:
+        elif resp == 2:
             print("No animation")
         else:
             print("Unknown setting value, something failed.")
@@ -1240,7 +1246,7 @@ class HWSettingsAnimationSet(DeviceRequiredUnit):
 
     def on_exec(self, args: argparse.Namespace):
         mode = args.mode
-        self.cmd.set_settings_animation(mode)
+        self.cmd.set_animation_mode(mode)
         print("Animation mode change success. Do not forget to store your settings in flash!")
 
 
@@ -1251,8 +1257,7 @@ class HWSettingsStore(DeviceRequiredUnit):
 
     def on_exec(self, args: argparse.Namespace):
         print("Storing settings...")
-        resp: chameleon_com.Response = self.cmd.store_settings()
-        if resp.status == chameleon_status.Device.STATUS_DEVICE_SUCCESS:
+        if self.cmd.save_settings():
             print(" - Store success @.@~")
         else:
             print(" - Store failed")
@@ -1265,8 +1270,7 @@ class HWSettingsReset(DeviceRequiredUnit):
 
     def on_exec(self, args: argparse.Namespace):
         print("Initializing settings...")
-        resp: chameleon_com.Response = self.cmd.reset_settings()
-        if resp.status == chameleon_status.Device.STATUS_DEVICE_SUCCESS:
+        if self.cmd.reset_settings():
             print(" - Reset success @.@~")
         else:
             print(" - Reset failed")
@@ -1286,8 +1290,7 @@ class HWFactoryReset(DeviceRequiredUnit):
         if not args.i_know_what_im_doing:
             print("This time your data's safe. Read the command documentation next time.")
             return
-        resp = self.cmd.factory_reset()
-        if resp.status == chameleon_status.Device.STATUS_DEVICE_SUCCESS:
+        if self.cmd.wipe_fds():
             print(" - Reset successful! Please reconnect.")
             # let time for comm thread to close port
             time.sleep(0.1)
@@ -1304,9 +1307,7 @@ class HWBatteryInfo(DeviceRequiredUnit):
         return None
 
     def on_exec(self, args: argparse.Namespace):
-        resp = self.cmd.battery_information()
-        voltage = int.from_bytes(resp.data[:2], 'big')
-        percentage = resp.data[2]
+        voltage, percentage = self.cmd.get_battery_info()
         print(" - Battery information:")
         print(f"   voltage    -> {voltage}mV")
         print(f"   percentage -> {percentage}%")
@@ -1325,10 +1326,10 @@ class HWButtonSettingsGet(DeviceRequiredUnit):
         button_list = [chameleon_cmd.ButtonType.ButtonA, chameleon_cmd.ButtonType.ButtonB, ]
         print("")
         for button in button_list:
-            resp = self.cmd.get_button_press_fun(button)
-            resp_long = self.cmd.get_long_button_press_fun(button)
-            button_fn = chameleon_cmd.ButtonPressFunction.from_int(resp.data[0])
-            button_long_fn = chameleon_cmd.ButtonPressFunction.from_int(resp_long.data[0])
+            resp = self.cmd.get_button_press_config(button)
+            resp_long = self.cmd.get_long_button_press_config(button)
+            button_fn = chameleon_cmd.ButtonPressFunction.from_int(resp)
+            button_long_fn = chameleon_cmd.ButtonPressFunction.from_int(resp_long)
             print(f" - {colorama.Fore.GREEN}{button} {colorama.Fore.YELLOW}short{colorama.Style.RESET_ALL}:"
                   f" {button_fn}")
             print(f"      usage: {button_fn.usage()}")
@@ -1359,9 +1360,9 @@ class HWButtonSettingsSet(DeviceRequiredUnit):
         button = chameleon_cmd.ButtonType.from_str(args.b)
         function = chameleon_cmd.ButtonPressFunction.from_int(args.f)
         if args.long:
-            self.cmd.set_long_button_press_fun(button, function)
+            self.cmd.set_long_button_press_config(button, function)
         else:
-            self.cmd.set_button_press_fun(button, function)
+            self.cmd.set_button_press_config(button, function)
         print(" - Successfully set button function to settings")
 
 
@@ -1374,9 +1375,9 @@ class HWSettingsBLEKey(DeviceRequiredUnit):
         return parser
 
     def on_exec(self, args: argparse.Namespace):
-        resp = self.cmd.get_ble_connect_key()
+        resp = self.cmd.get_ble_pairing_key()
         print(" - The current key of the device(ascii): "
-              f"{colorama.Fore.GREEN}{resp.data.decode(encoding='ascii')}{colorama.Style.RESET_ALL}")
+              f"{colorama.Fore.GREEN}{resp.decode(encoding='ascii')}{colorama.Style.RESET_ALL}")
         
         if args.key != None:
             if len(args.key) != 6:
@@ -1449,5 +1450,12 @@ class HWRaw(DeviceRequiredUnit):
         response = self.cmd.device.send_cmd_sync(args.command, data=bytes.fromhex(args.data), status=0x0)
         print(" - Received:")
         print(f"   Command: {response.cmd}")
-        print(f"   Status: {response.status}")
+        status_string = f"   Status:  {response.status:#02x}"
+        if response.status in chameleon_status.Device:
+            status_string += f" {chameleon_status.Device[response.status]}"
+            if response.status in chameleon_status.message:
+                status_string += f": {chameleon_status.message[response.status]}"
+                print(status_string)
+        else:
+            print(f"   Status: {response.status:#02x}")
         print(f"   Data (HEX): {response.data.hex()}")

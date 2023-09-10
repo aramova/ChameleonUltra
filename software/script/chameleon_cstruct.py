@@ -1,7 +1,7 @@
 """
     From bytes to c struct parser(Chameleon data response)
 """
-
+# FIXME: replace by struct.unpack?
 
 def bytes_to_u32(byte_array):
     """

@@ -136,7 +136,7 @@ typedef struct {
 } nfc_tag_mf1_auth_log_t;
 
 
-nfc_tag_mf1_auth_log_t *get_mf1_auth_log(uint32_t *count);
+nfc_tag_mf1_auth_log_t *mf1_get_auth_log(uint32_t *count);
 int nfc_tag_mf1_data_loadcb(tag_specific_type_t type, tag_data_buffer_t *buffer);
 int nfc_tag_mf1_data_savecb(tag_specific_type_t type, tag_data_buffer_t *buffer);
 bool nfc_tag_mf1_data_factory(uint8_t slot, tag_specific_type_t tag_type);

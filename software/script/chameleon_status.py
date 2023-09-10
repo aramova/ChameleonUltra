@@ -12,6 +12,14 @@ class MetaDevice(type):
                     return True
         return False
 
+    def __getitem__(self, item):
+        for field in self.__dict__:
+            val = self.__dict__[field]
+            if isinstance(val, int):
+                if val == item:
+                    return field
+        return False
+
 
 class Device(metaclass=MetaDevice):
     HF_TAG_OK = 0x00     # IC card operation is successful

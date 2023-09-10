@@ -388,7 +388,7 @@ void append_mf1_auth_log_step3(bool is_auth_success) {
 /** @brief MF1 obtain verification log
  * @param count: The statistics of the verification log
  */
-nfc_tag_mf1_auth_log_t *get_mf1_auth_log(uint32_t *count) {
+nfc_tag_mf1_auth_log_t *mf1_get_auth_log(uint32_t *count) {
     // First pass the total number of logs verified by verified
     *count = m_auth_log.count;
     // Just return to the head pointer of the log number array
